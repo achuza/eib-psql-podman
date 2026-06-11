@@ -1,8 +1,8 @@
-# Edge Image Builder - Manufacturing Virtualization Lab
+# Edge Image Builder - PostgreSQL HA Lab
 
-Build customized SUSE Linux Micro images for edge deployments using the [SUSE Edge Image Builder](https://github.com/suse-edge/edge-image-builder).
+Build a customized SUSE Linux Micro image that boots a 3-node k3s edge cluster with **CloudNativePG-managed HA PostgreSQL 18** as the headline workload, using the [SUSE Edge Image Builder](https://github.com/suse-edge/edge-image-builder).
 
-This repository contains configurations for building edge images with integrated virtualization and Liz AI capabilities. 
+This lab is a PostgreSQL-focused variant of the broader EIB stack: same edge management substrate (Rancher + Longhorn), but the data tier is the point.
 
 ---
 
@@ -10,16 +10,31 @@ This repository contains configurations for building edge images with integrated
 
 | Configuration | Description | EIB Version | Base OS |
 |---------------|-------------|-------------|---------|
-| **rancher-3node** | 3-node k3s cluster with Rancher, KubeVirt, Longhorn, CDI, and Rancher AI | 1.3 | SL Micro 6.2 |
+| **rancher-3node** | 3-node k3s cluster running a CloudNativePG operator + 3-instance SUSE PostgreSQL 18 HA cluster, on Longhorn replicated storage, managed by Rancher. | 1.3 | SL Micro 6.2 |
 
-### rancher-3node Features
+### Database Stack
 
-- **Kubernetes**: k3s v1.33.6
-- **Management**: Rancher 2.13.0
-- **Virtualization**: KubeVirt 0.6.0 + CDI + Dashboard Extension
-- **Storage**: Longhorn 1.9.2
-- **AI**: Rancher AI Agent + UI Extension
-- **IIoT**: Ignition by Inductive Automation
+- **Operator**: CloudNativePG 0.28.2 (chart) / CNPG operator image 1.29.1
+- **Engine**: SUSE PostgreSQL 18 (`registry.suse.com/suse/postgres:18`)
+- **Cluster name**: `suse-psql` in namespace `db-production`
+- **Topology**: 3 instances, preferred pod anti-affinity by hostname
+- **Replication**: `minSyncReplicas: 1`, `maxSyncReplicas: 1`
+- **Storage**: 20 GiB per instance, `longhorn-replicated-2` storage class
+- **External access**: `suse-psql-external` `LoadBalancer` service (read-write)
+- **Pod security**: non-root (uid/gid 999)
+- **Embedded images**: bundled in the image so the cluster can come up air-gapped
+
+The cluster manifest lives at `rancher-3node/kubernetes/manifests/02-postgres-cluster.yaml` — edit it to change instance count, storage size, resource limits, or sync replica policy.
+
+### Supporting Stack
+
+- **Kubernetes**: k3s v1.34.8+k3s1
+- **Management**: Rancher 2.13.2 (with cert-manager 1.14.2)
+- **Storage**: Longhorn 1.11.1 (chart 109.3.0+up1.11.1) — backing CNPG volumes
+- **AI**: Rancher AI Agent 0.1.0 + Rancher AI UI Extension 0.1.15
+- **IIoT**: Ignition by Inductive Automation 0.2.0
+- **Virtualization** *(optional, disabled by default)*: KubeVirt 0.6.0 + CDI + Dashboard — commented out in `eib-config.yaml`; uncomment those chart blocks (and the `suse-edge` repository) to enable.
+- **Security** *(optional, disabled by default)*: NeuVector 2.8.10 — likewise commented out.
 
 ---
 
@@ -27,22 +42,20 @@ This repository contains configurations for building edge images with integrated
 
 ### Base Images
 
-Download the appropriate base image for your configuration:
-
-- **For rancher-3node**: [SL Micro 6.2 ISO](https://www.suse.com/download/sle-micro/)
-  - `SL-Micro.aarch64-6.2-Base-SelfInstall-GM.install.iso`
+- [SL Micro 6.2 ISO](https://www.suse.com/download/sle-micro/)
+  - `SL-Micro.aarch64-6.2-Default-SelfInstall-GM.install.iso`
 
 ### Required Tools
 
 - **[Podman](https://podman.io/)** — Container runtime (required for building images)
-- **[UTM](https://mac.getutm.app/)** — Virtual machine host for macOS (optional, for testing)
-- **[Ollama](https://ollama.com/)** — Local LLM runtime (optional, required for Rancher AI features)
+- **[UTM](https://mac.getutm.app/)** — VM host for macOS (optional, for local testing)
+- **[Ollama](https://ollama.com/)** — Local LLM runtime (optional, only if you exercise the Rancher AI extension)
 
 ---
 
 ## System Setup (MacBook)
 
-### 1. Install Podman (Required)
+### 1. Install Podman
 
 ```bash
 brew install podman
@@ -50,10 +63,9 @@ podman machine init --cpus 6 --memory 8192 --disk-size 100
 podman machine start
 ```
 
-### 2. Pull Edge Image Builder Container
+### 2. Pull Edge Image Builder
 
 ```bash
-# For rancher-3node configuration (EIB 1.3)
 podman pull registry.suse.com/edge/3.5/edge-image-builder:1.3.2
 ```
 
@@ -63,56 +75,18 @@ podman pull registry.suse.com/edge/3.5/edge-image-builder:1.3.2
 brew install utm
 ```
 
-### 4. Set Up Ollama (Optional - for Rancher AI features)
-
-```bash
-brew install ollama
-ollama serve  # Start the Ollama service
-
-# In a new terminal, pull the required models
-ollama pull gpt-oss:20b
-ollama pull qwen3-embedding:4b
-```
-
 ---
 
-## Building Images
-
-### Configuration: rancher-3node
-
-This builds a complete virtualization-enabled management cluster with Rancher.
-
-#### 1. Clone the Repository
-
-```bash
-git clone https://github.com/achuza/eib-manuf-lab.git
-cd eib-manuf-lab
-```
-
-#### 2. Prepare the Configuration
-
-Navigate to the rancher-3node directory:
+## Building the Image
 
 ```bash
 cd rancher-3node
-```
-
-Create base images folder:
-
-```bash
 mkdir base-images
+mv ~/Downloads/SL-Micro.aarch64-6.2-Default-SelfInstall-GM.install.iso \
+   base-images/SL-Micro.aarch64-6.2-Default-SelfInstall-GM.install.iso
 ```
 
-
-Place your downloaded base image in the same directory and rename it:
-
-```bash
-# Your ISO should be named according to eib-config.yaml
-mv ~/Downloads/SL-Micro.aarch64-6.2-Default-SelfInstall-GM.install.iso base-images/SL-Micro.aarch64-6.2-Default-SelfInstall-GM.install.iso
-
-#### 3. Update SUSE Registration Code
-
-Edit `eib-config.yaml` and add your SUSE registration code:
+Add your SUSE registration code to `eib-config.yaml`:
 
 ```yaml
 operatingSystem:
@@ -120,9 +94,7 @@ operatingSystem:
     sccRegistrationCode: YOUR-REGISTRATION-CODE-HERE
 ```
 
-> **Note:** A valid SUSE registration code is required to install additional packages like `open-iscsi`.
-
-#### 4. Run the Build
+Build:
 
 ```bash
 podman run --privileged --rm -it \
@@ -131,107 +103,160 @@ podman run --privileged --rm -it \
   build --definition-file eib-config.yaml
 ```
 
-#### 5. Output
-
-The built image will be created in the same directory:
-- `rancher-3node-aarch64-6.2.iso`
+Output: `rancher-3node-aarch64-6.2.iso`.
 
 ---
 
 ## Deployment
 
-### Deploying to UTM (macOS)
+### UTM (macOS)
 
-1. Open UTM and create a new virtual machine
-2. Select "Virtualize" and choose "Linux"
-3. Configure the VM:
-   - **Boot ISO/Image**: Select your built image
-   - **Memory**: 4096 MB minimum (8192 MB recommended)
-   - **CPU Cores**: 4 minimum (8 recommended)
-   - **Storage**: 100 GB minimum
-   - **Network**: MAC Address of respective node
-4. Start the VM to complete automated setup
+Create three VMs (one per node) using the built ISO. Recommended per node:
 
-### Network Configuration
+- **Memory**: 8192 MB
+- **CPU**: 4–8 cores
+- **Storage**: 100 GB
+- **Network**: shared (UTM default is `192.168.64.x`); set each node's MAC to match the config
 
-The rancher-3node configuration uses:
+### Network
+
 - **API VIP**: `192.168.64.10`
-- **API Host**: `192.168.64.10.sslip.io`
-
-Ensure your network allows access to these addresses. For UTM, the default shared network typically uses the `192.168.64.x` range.
-
-### Accessing Rancher
-
-After deployment and cluster initialization:
-
-1. Wait for all pods to be running (5-10 minutes)
-2. Access Rancher UI at: `https://192.168.64.10.sslip.io`
-3. Retrieve the bootstrap password:
-   ```bash
-   kubectl get secret --namespace cattle-system bootstrap-secret -o go-template='{{.data.bootstrapPassword|base64decode}}{{"\n"}}'
-   ```
+- **API host**: `192.168.64.10.sslip.io`
 
 ---
 
-## Troubleshooting
+## Working with the PostgreSQL Cluster
 
-### Build Failures
+Once all three nodes are up and the cluster has settled (5–10 minutes after first boot), the CloudNativePG cluster will reconcile.
 
-**Issue**: "No space left on device"
-- **Solution**: Increase Podman machine disk size:
-  ```bash
-  podman machine rm
-  podman machine init --cpus 6 --memory 8192 --disk-size 100
-  ```
+### Verify the cluster
 
-**Issue**: "Permission denied" errors
-- **Solution**: Ensure the Podman command includes `--privileged` flag
+```bash
+kubectl get cluster -n db-production
+kubectl get pods -n db-production -l cnpg.io/cluster=suse-psql
+kubectl get pvc -n db-production
+```
 
-**Issue**: Package installation failures
-- **Solution**: Verify your SUSE registration code is valid and properly set in `eib-config.yaml`
+You should see three pods (`suse-psql-1`, `suse-psql-2`, `suse-psql-3`) with one primary and two replicas.
 
-### Runtime Issues
+### Connect from inside the cluster
 
-**Issue**: Cluster not initializing
-- **Solution**: Check node networking and ensure all three nodes can communicate on the `192.168.64.x` network
+```bash
+kubectl get svc -n db-production
+# suse-psql-rw   ClusterIP — read-write to current primary
+# suse-psql-ro   ClusterIP — read-only to replicas
+# suse-psql-r    ClusterIP — round-robin reads across all instances
+```
 
-**Issue**: Rancher UI not accessible
-- **Solution**: Verify all Rancher pods are running:
-  ```bash
-  kubectl get pods -n cattle-system
-  ```
+### Connect from outside the cluster
+
+The `suse-psql-external` `LoadBalancer` service is provisioned for external R/W access:
+
+```bash
+kubectl get svc -n db-production suse-psql-external
+```
+
+Use the assigned external IP (Longhorn/MetalLB will allocate from the configured pool — see `rancher-3node/kubernetes/manifests/postgres-ippool-l2adv.yaml`).
+
+### Retrieve the superuser credentials
+
+CNPG generates a `Secret` named `suse-psql-superuser`:
+
+```bash
+kubectl get secret -n db-production suse-psql-superuser \
+  -o jsonpath='{.data.password}' | base64 -d
+```
+
+### Inspect cluster status with the cnpg plugin
+
+```bash
+kubectl cnpg status suse-psql -n db-production
+```
+
+(Install the [cnpg kubectl plugin](https://cloudnative-pg.io/documentation/current/kubectl-plugin/) first if you don't have it.)
+
+### Accessing Rancher
+
+```bash
+kubectl get secret --namespace cattle-system bootstrap-secret \
+  -o go-template='{{.data.bootstrapPassword|base64decode}}{{"\n"}}'
+```
+
+Then browse to `https://192.168.64.10.sslip.io`.
 
 ---
 
 ## Customization
 
-### Adding/Removing Helm Charts
+### Scale the PostgreSQL cluster
 
-Modify the `kubernetes.helm.charts` section in `eib-config.yaml`. Each chart requires:
-- `name`: Chart name
-- `version`: Chart version
-- `repositoryName`: Repository reference
-- `targetNamespace`: Installation namespace
-- `valuesFile`: (optional) Custom values file
+Edit `rancher-3node/kubernetes/manifests/02-postgres-cluster.yaml`:
 
-### Changing Kubernetes Version
+```yaml
+spec:
+  instances: 5         # add replicas
+  storage:
+    size: 100Gi        # bigger volumes
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1"
+    limits:
+      memory: "8Gi"
+```
 
-Update the version in `eib-config.yaml`:
+CNPG will reconcile rolling.
+
+### Use a different Postgres image
+
+Swap `spec.imageName` to any CNPG-compatible image (e.g., a different SUSE Postgres tag, or upstream `ghcr.io/cloudnative-pg/postgresql`). Don't forget to add it to `embeddedArtifactRegistry.images` in `eib-config.yaml` if you want it bundled into the ISO.
+
+### Change the storage class
+
+The default is `longhorn-replicated-2` (2 replicas). Switch `storage.storageClass` to `longhorn-replicated-3` for stronger durability at the cost of capacity. The available classes are defined in `rancher-3node/kubernetes/manifests/01-longhorn-storageclass.yaml`.
+
+### Adjust Helm charts
+
+Modify `kubernetes.helm.charts` in `eib-config.yaml`. Each entry needs `name`, `version`, `repositoryName`, `targetNamespace`.
+
+### Change Kubernetes version
 
 ```yaml
 kubernetes:
-  version: v1.33.6+k3s1
+  version: v1.34.8+k3s1
 ```
 
-Check [k3s releases](https://github.com/k3s-io/k3s/releases) for available versions.
+See [k3s releases](https://github.com/k3s-io/k3s/releases).
+
+---
+
+## Troubleshooting
+
+### Build failures
+
+- **"No space left on device"** — increase Podman disk: `podman machine rm && podman machine init --cpus 6 --memory 8192 --disk-size 100`
+- **"Permission denied"** — make sure `podman run` includes `--privileged`
+- **Package install failures** — verify your SCC registration code
+
+### PostgreSQL cluster won't start
+
+- Check operator logs: `kubectl logs -n cnpg-system -l app.kubernetes.io/name=cloudnative-pg`
+- Check cluster events: `kubectl describe cluster suse-psql -n db-production`
+- Check PVCs are bound: `kubectl get pvc -n db-production` (Longhorn must be healthy)
+- Verify Longhorn nodes: `kubectl get nodes.longhorn.io -n longhorn-system`
+
+### LoadBalancer service stuck pending
+
+- The IP pool / L2 advertisement manifests (`postgres-ippool-l2adv.yaml`) must apply successfully. Check MetalLB / Longhorn LB controller logs.
 
 ---
 
 ## Resources
 
-- [Edge Image Builder Documentation](https://github.com/suse-edge/edge-image-builder)
+- [CloudNativePG Documentation](https://cloudnative-pg.io/documentation/)
+- [SUSE PostgreSQL Container](https://registry.suse.com/suse/postgres)
+- [Edge Image Builder](https://github.com/suse-edge/edge-image-builder)
 - [SUSE Linux Micro Downloads](https://www.suse.com/download/sle-micro/)
 - [Rancher Documentation](https://ranchermanager.docs.rancher.com/)
-- [KubeVirt Documentation](https://kubevirt.io/user-guide/)
-- [k3s Documentation](https://docs.k3s.io/)
 - [Longhorn Documentation](https://longhorn.io/docs/)
+- [k3s Documentation](https://docs.k3s.io/)
