@@ -11,7 +11,7 @@ This is the lightweight, no-Kubernetes counterpart to [eib-psql-lab](https://git
 | Layer | What it is |
 |---|---|
 | **Base OS** | SUSE Linux Micro 6.2 (immutable, transactional) |
-| **Container engine** | Podman (installed from SL Micro packages) |
+| **Container engine** | Podman (ships in the SL Micro base image) |
 | **Database** | SUSE PostgreSQL 18 (`registry.suse.com/suse/postgres:18`, embedded in the ISO) |
 | **Process supervision** | systemd Quadlet → `/etc/containers/systemd/postgres.container` → auto-generated `postgres.service` |
 | **Data persistence** | Host bind mount `/var/lib/postgres/data` → container `/var/lib/postgresql/data` |
@@ -37,7 +37,6 @@ psql-podman/
 ## Prerequisites
 
 - [SL Micro 6.2 ISO](https://www.suse.com/download/sle-micro/) — `SL-Micro.aarch64-6.2-Default-SelfInstall-GM.install.iso`
-- A valid SUSE registration code (needed at build time to install `podman` from SCC)
 - [Podman](https://podman.io/) on the build host
 - [UTM](https://mac.getutm.app/) on macOS (optional, for local testing)
 
@@ -68,23 +67,13 @@ mv ~/Downloads/SL-Micro.aarch64-6.2-Default-SelfInstall-GM.install.iso \
    base-images/SL-Micro.aarch64-6.2-Default-SelfInstall-GM.install.iso
 ```
 
-### 4. Add your SUSE registration code
-
-Edit `eib-config.yaml`:
-
-```yaml
-operatingSystem:
-  packages:
-    sccRegistrationCode: YOUR-REGISTRATION-CODE-HERE
-```
-
-### 5. (Optional) Adjust networking
+### 4. (Optional) Adjust networking
 
 `network/psql.suse.com.yaml` ships with a static IP (`192.168.64.11/24`, gateway `192.168.64.1`) and a placeholder MAC address. Either:
 - Edit `mac-address` to match your VM/host and adjust the IP, **or**
 - Delete `network/psql.suse.com.yaml` to fall back to DHCP.
 
-### 6. Build the ISO
+### 5. Build the ISO
 
 ```bash
 podman run --privileged --rm -it \
@@ -242,7 +231,6 @@ Add `User=postgres` and adjust the volume ownership. The SUSE postgres image run
 
 - **"No space left on device"** — increase Podman machine disk: `podman machine rm && podman machine init --cpus 6 --memory 8192 --disk-size 100`
 - **"Permission denied"** — the build needs `--privileged`
-- **Package install failures** — verify SCC registration code is valid
 
 ### postgres.service doesn't start
 
