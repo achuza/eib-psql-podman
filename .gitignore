@@ -1,5 +1,6 @@
 **/_build/
 **/base-images/
+**/.claude/
 *.iso
 .DS_Store
 *.raw

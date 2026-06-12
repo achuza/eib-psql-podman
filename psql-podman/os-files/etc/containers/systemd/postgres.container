@@ -1,17 +1,44 @@
 [Unit]
 Description=SUSE PostgreSQL 18 (Podman)
+# Wait for the embedded image registry so Podman can resolve registry.suse.com
+# through the localhost:6545 mirror (see registries.conf.d/000-eib-mirror.conf).
+# On an internet-connected host without the embedded registry, you can drop
+# eib-embedded-registry.service from both lines.
 Wants=network-online.target eib-embedded-registry.service
 After=network-online.target eib-embedded-registry.service
+# Refuse to start until the first-boot bootstrap has written the env file.
 ConditionPathExists=/etc/postgres/postgres.env
 
 [Container]
+# To use a different Postgres image or version:
+#   1) Change this line.
+#   2) Add the same image to embeddedArtifactRegistry.images in eib-config.yaml
+#      so it ships in the ISO (otherwise first boot tries to pull from the
+#      internet and fails on air-gapped hosts).
 Image=registry.suse.com/suse/postgres:18
 ContainerName=postgres
+
+# host_port:container_port. Change the left side to publish on a different host
+# port (e.g. 15432:5432). Comment out entirely to keep Postgres off any
+# host-facing port — it stays reachable via `podman exec`.
 PublishPort=5432:5432
+
+# host_path:container_path. The container always expects PGDATA at
+# /var/lib/postgresql/data; the left side controls where it lives on disk.
+# If you change the host path:
+#   - Update os-files/etc/tmpfiles.d/postgres.conf to pre-create the new dir.
+#   - Keep :Z so SELinux relabels the mount (required on SL Micro).
+#   - To put PGDATA on a separate disk, partition/mount it first, then point
+#     the host side at the mount point.
 Volume=/var/lib/postgres/data:/var/lib/postgresql/data:Z
+
+# Env file is generated on first boot by custom/scripts/10-postgres-bootstrap.sh.
+# Edit that script to change the default user/db/password policy.
 EnvironmentFile=/etc/postgres/postgres.env
 
 [Service]
+# always = restart on any exit, including clean ones. Use on-failure if you
+# want intentional `systemctl stop` to stay stopped.
 Restart=always
 TimeoutStartSec=300
 

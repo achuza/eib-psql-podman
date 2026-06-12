@@ -4,6 +4,8 @@ Build a **single-node** SUSE Linux Micro 6.2 edge image that runs **SUSE Postgre
 
 This is the lightweight, no-Kubernetes counterpart to [eib-psql-lab](https://github.com/achuza/eib-psql-lab) (the HA CloudNativePG variant). Use this when you want a single edge box that just runs Postgres — no k3s, no Rancher, no Longhorn.
 
+> **⚠️ Disclaimer:** Running SUSE Linux Micro on a MacBook (via UTM or any other macOS hypervisor) is intended for **local testing and development only**. This configuration is **not a supported SUSE deployment platform** — production workloads should run on certified hardware. Use the macOS/UTM path here to iterate on the image; deploy the resulting ISO to supported hardware for anything real.
+
 ---
 
 ## Architecture
@@ -226,6 +228,84 @@ Add `User=postgres` and adjust the volume ownership. The SUSE postgres image run
 ---
 
 ## Troubleshooting
+
+### Reading logs on SL Micro
+
+SL Micro has no flat log files under `/var/log` — everything goes through `systemd-journald`. The journal is the single source of truth; learn these queries first, then jump to the specific failure modes below.
+
+**Current and previous boots**
+
+```bash
+sudo journalctl -b                  # everything since this boot
+sudo journalctl -b -p err           # errors only (warning/crit also valid)
+sudo journalctl -b -1               # the previous boot (useful after a crash/reboot)
+sudo journalctl --list-boots        # enumerate all boots the journal still has
+```
+
+**Per-service logs**
+
+```bash
+sudo journalctl -u postgres.service -f                  # follow Postgres
+sudo journalctl -u eib-embedded-registry.service        # Hauler registry
+sudo journalctl -u systemd-tmpfiles-setup.service       # creates /var/lib/postgres/data at boot
+sudo journalctl -u podman.service                       # Podman socket / generator
+```
+
+**First-boot / combustion failures**
+
+Combustion's output lands in the journal under the `combustion` tag. The key diagnostic for this image is the `Separate /var detected.` line — it confirms `/var` is a separate subvolume and explains why anything `mkdir`'d under `/var` from a combustion script disappears at boot.
+
+```bash
+sudo journalctl -b | grep -i combustion
+sudo journalctl -b | grep -i 'separate /var'
+```
+
+**Quadlet generation**
+
+A malformed `.container` file produces no `.service` unit at all — `systemctl status postgres.service` will say "not loaded." Dry-run the generator to surface parse errors:
+
+```bash
+sudo /usr/libexec/podman/podman-system-generator --user=0 --dry-run
+sudo journalctl -b | grep -i quadlet
+```
+
+**Container runtime**
+
+```bash
+sudo podman logs postgres           # stdout/stderr from the Postgres process
+sudo podman logs -f postgres        # follow
+sudo podman inspect postgres        # mounts, env, network, restart policy
+sudo podman ps -a                   # include stopped/exited containers
+```
+
+**Transactional updates and snapshots**
+
+If the system rolled back or an update is pending:
+
+```bash
+sudo transactional-update status    # pending update, current snapshot
+sudo snapper list                   # all btrfs snapshots
+sudo journalctl -u transactional-update.service
+```
+
+**Filesystem layout sanity check**
+
+Confirm the subvolumes and bind-mount source look right — useful when Postgres won't start with "permission denied" or "no such file" on the data dir:
+
+```bash
+findmnt /var                        # should show /var as its own subvolume
+sudo btrfs subvolume list /
+df -h /var/lib/postgres/data
+ls -ld /var/lib/postgres /var/lib/postgres/data
+```
+
+**Network**
+
+```bash
+nmcli                                # active connections, IPs
+sudo journalctl -u NetworkManager
+ss -lntp | grep 5432                 # confirm Postgres is listening on the host
+```
 
 ### Build failures
 
