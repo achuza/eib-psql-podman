@@ -1,0 +1,19 @@
+[Unit]
+Description=SUSE PostgreSQL 18 (Podman)
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/postgres/postgres.env
+
+[Container]
+Image=registry.suse.com/suse/postgres:18
+ContainerName=postgres
+PublishPort=5432:5432
+Volume=/var/lib/postgres/data:/var/lib/postgresql/data:Z
+EnvironmentFile=/etc/postgres/postgres.env
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target default.target

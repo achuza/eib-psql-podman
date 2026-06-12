@@ -1,61 +1,49 @@
-# Edge Image Builder - PostgreSQL HA Lab
+# Edge Image Builder - PostgreSQL Podman Lab
 
-Build a customized SUSE Linux Micro image that boots a 3-node k3s edge cluster with **CloudNativePG-managed HA PostgreSQL 18** as the headline workload, using the [SUSE Edge Image Builder](https://github.com/suse-edge/edge-image-builder).
+Build a **single-node** SUSE Linux Micro 6.2 edge image that runs **SUSE PostgreSQL 18 in a Podman container**, managed by a **systemd Quadlet** so it survives reboots, using the [SUSE Edge Image Builder](https://github.com/suse-edge/edge-image-builder).
 
-This lab is a PostgreSQL-focused variant of the broader EIB stack: same edge management substrate (Rancher + Longhorn), but the data tier is the point.
+This is the lightweight, no-Kubernetes counterpart to [eib-psql-lab](https://github.com/achuza/eib-psql-lab) (the HA CloudNativePG variant). Use this when you want a single edge box that just runs Postgres — no k3s, no Rancher, no Longhorn.
 
 ---
 
-## Available Configurations
+## Architecture
 
-| Configuration | Description | EIB Version | Base OS |
-|---------------|-------------|-------------|---------|
-| **rancher-3node** | 3-node k3s cluster running a CloudNativePG operator + 3-instance SUSE PostgreSQL 18 HA cluster, on Longhorn replicated storage, managed by Rancher. | 1.3 | SL Micro 6.2 |
+| Layer | What it is |
+|---|---|
+| **Base OS** | SUSE Linux Micro 6.2 (immutable, transactional) |
+| **Container engine** | Podman (installed from SL Micro packages) |
+| **Database** | SUSE PostgreSQL 18 (`registry.suse.com/suse/postgres:18`, embedded in the ISO) |
+| **Process supervision** | systemd Quadlet → `/etc/containers/systemd/postgres.container` → auto-generated `postgres.service` |
+| **Data persistence** | Host bind mount `/var/lib/postgres/data` → container `/var/lib/postgresql/data` |
+| **Credentials** | Generated on first boot by a combustion script, stored at `/etc/postgres/postgres.env` |
+| **External access** | Container port `5432` published on the host |
+| **HA / replication** | None — single instance |
 
-### Database Stack
+### Repo layout
 
-- **Operator**: CloudNativePG 0.28.2 (chart) / CNPG operator image 1.29.1
-- **Engine**: SUSE PostgreSQL 18 (`registry.suse.com/suse/postgres:18`)
-- **Cluster name**: `suse-psql` in namespace `db-production`
-- **Topology**: 3 instances, preferred pod anti-affinity by hostname
-- **Replication**: `minSyncReplicas: 1`, `maxSyncReplicas: 1`
-- **Storage**: 20 GiB per instance, `longhorn-replicated-2` storage class
-- **External access**: `suse-psql-external` `LoadBalancer` service (read-write)
-- **Pod security**: non-root (uid/gid 999)
-- **Embedded images**: bundled in the image so the cluster can come up air-gapped
-
-The cluster manifest lives at `rancher-3node/kubernetes/manifests/02-postgres-cluster.yaml` — edit it to change instance count, storage size, resource limits, or sync replica policy.
-
-### Supporting Stack
-
-- **Kubernetes**: k3s v1.34.8+k3s1
-- **Management**: Rancher 2.13.2 (with cert-manager 1.14.2)
-- **Storage**: Longhorn 1.11.1 (chart 109.3.0+up1.11.1) — backing CNPG volumes
-- **AI**: Rancher AI Agent 0.1.0 + Rancher AI UI Extension 0.1.15
-- **IIoT**: Ignition by Inductive Automation 0.2.0
-- **Virtualization** *(optional, disabled by default)*: KubeVirt 0.6.0 + CDI + Dashboard — commented out in `eib-config.yaml`; uncomment those chart blocks (and the `suse-edge` repository) to enable.
-- **Security** *(optional, disabled by default)*: NeuVector 2.8.10 — likewise commented out.
+```
+psql-podman/
+  eib-config.yaml                                    # EIB definition (no k8s block)
+  custom/scripts/10-postgres-bootstrap.sh            # First-boot: generate password + env file
+  os-files/etc/containers/systemd/postgres.container # Quadlet: postgres.service at boot
+  os-files/etc/ssh/sshd_config                       # Enables root SSH
+  network/psql.suse.com.yaml                         # Static net config (optional; delete for DHCP)
+```
 
 ---
 
 ## Prerequisites
 
-### Base Images
-
-- [SL Micro 6.2 ISO](https://www.suse.com/download/sle-micro/)
-  - `SL-Micro.aarch64-6.2-Default-SelfInstall-GM.install.iso`
-
-### Required Tools
-
-- **[Podman](https://podman.io/)** — Container runtime (required for building images)
-- **[UTM](https://mac.getutm.app/)** — VM host for macOS (optional, for local testing)
-- **[Ollama](https://ollama.com/)** — Local LLM runtime (optional, only if you exercise the Rancher AI extension)
+- [SL Micro 6.2 ISO](https://www.suse.com/download/sle-micro/) — `SL-Micro.aarch64-6.2-Default-SelfInstall-GM.install.iso`
+- A valid SUSE registration code (needed at build time to install `podman` from SCC)
+- [Podman](https://podman.io/) on the build host
+- [UTM](https://mac.getutm.app/) on macOS (optional, for local testing)
 
 ---
 
-## System Setup (MacBook)
+## Build
 
-### 1. Install Podman
+### 1. Set up Podman on the build host (macOS)
 
 ```bash
 brew install podman
@@ -69,24 +57,18 @@ podman machine start
 podman pull registry.suse.com/edge/3.5/edge-image-builder:1.3.2
 ```
 
-### 3. Install UTM
+### 3. Prepare the build directory
 
 ```bash
-brew install utm
-```
-
----
-
-## Building the Image
-
-```bash
-cd rancher-3node
+cd psql-podman
 mkdir base-images
 mv ~/Downloads/SL-Micro.aarch64-6.2-Default-SelfInstall-GM.install.iso \
    base-images/SL-Micro.aarch64-6.2-Default-SelfInstall-GM.install.iso
 ```
 
-Add your SUSE registration code to `eib-config.yaml`:
+### 4. Add your SUSE registration code
+
+Edit `eib-config.yaml`:
 
 ```yaml
 operatingSystem:
@@ -94,7 +76,13 @@ operatingSystem:
     sccRegistrationCode: YOUR-REGISTRATION-CODE-HERE
 ```
 
-Build:
+### 5. (Optional) Adjust networking
+
+`network/psql.suse.com.yaml` ships with a static IP (`192.168.64.11/24`, gateway `192.168.64.1`) and a placeholder MAC address. Either:
+- Edit `mac-address` to match your VM/host and adjust the IP, **or**
+- Delete `network/psql.suse.com.yaml` to fall back to DHCP.
+
+### 6. Build the ISO
 
 ```bash
 podman run --privileged --rm -it \
@@ -103,130 +91,138 @@ podman run --privileged --rm -it \
   build --definition-file eib-config.yaml
 ```
 
-Output: `rancher-3node-aarch64-6.2.iso`.
+Output: `psql-podman-aarch64-6.2.iso`.
 
 ---
 
-## Deployment
+## Deploy
 
 ### UTM (macOS)
 
-Create three VMs (one per node) using the built ISO. Recommended per node:
+1. Create a single VM in UTM (Virtualize → Linux).
+2. Recommended: 4 CPU / 4 GB RAM / 40 GB disk.
+3. Boot from `psql-podman-aarch64-6.2.iso`.
+4. The image self-installs to `/dev/vda` and reboots.
+5. On first boot, combustion runs `10-postgres-bootstrap.sh`, which generates a random superuser password and prints it to the console (see screenshot or `journalctl -b` after login).
 
-- **Memory**: 8192 MB
-- **CPU**: 4–8 cores
-- **Storage**: 100 GB
-- **Network**: shared (UTM default is `192.168.64.x`); set each node's MAC to match the config
+### Network notes
 
-### Network
+If you kept the static network config:
+- Host: `psql.suse.com`
+- IP: `192.168.64.11/24`
+- Gateway: `192.168.64.1`
 
-- **API VIP**: `192.168.64.10`
-- **API host**: `192.168.64.10.sslip.io`
+UTM's default shared network uses `192.168.64.x`, so this should "just work" on a Mac.
 
 ---
 
-## Working with the PostgreSQL Cluster
+## First Boot — Retrieving the Password
 
-Once all three nodes are up and the cluster has settled (5–10 minutes after first boot), the CloudNativePG cluster will reconcile.
-
-### Verify the cluster
+The password is generated **once** on first boot and printed to the console. If you missed it, grab it from the env file after logging in as root:
 
 ```bash
-kubectl get cluster -n db-production
-kubectl get pods -n db-production -l cnpg.io/cluster=suse-psql
-kubectl get pvc -n db-production
+sudo grep POSTGRES_PASSWORD /etc/postgres/postgres.env
 ```
 
-You should see three pods (`suse-psql-1`, `suse-psql-2`, `suse-psql-3`) with one primary and two replicas.
-
-### Connect from inside the cluster
+Or from the journal:
 
 ```bash
-kubectl get svc -n db-production
-# suse-psql-rw   ClusterIP — read-write to current primary
-# suse-psql-ro   ClusterIP — read-only to replicas
-# suse-psql-r    ClusterIP — round-robin reads across all instances
+sudo journalctl -b | grep -A1 'PostgreSQL superuser password'
 ```
 
-### Connect from outside the cluster
+> **Heads up:** the password lives in `/etc/postgres/postgres.env` with mode `600`, root-owned. Rotate it manually if needed (update the file, then `systemctl restart postgres.service`).
 
-The `suse-psql-external` `LoadBalancer` service is provisioned for external R/W access:
+---
+
+## Working with PostgreSQL
+
+### Verify the service
 
 ```bash
-kubectl get svc -n db-production suse-psql-external
+systemctl status postgres.service
+podman ps
+podman logs postgres
 ```
 
-Use the assigned external IP (Longhorn/MetalLB will allocate from the configured pool — see `rancher-3node/kubernetes/manifests/postgres-ippool-l2adv.yaml`).
+The `postgres.service` is generated at boot from `/etc/containers/systemd/postgres.container` by `podman-system-generator`. You won't find a static `postgres.service` file on disk — that's expected.
 
-### Retrieve the superuser credentials
-
-CNPG generates a `Secret` named `suse-psql-superuser`:
+### Connect from inside the VM
 
 ```bash
-kubectl get secret -n db-production suse-psql-superuser \
-  -o jsonpath='{.data.password}' | base64 -d
+podman exec -it postgres psql -U postgres
 ```
 
-### Inspect cluster status with the cnpg plugin
+### Connect from outside the VM
 
 ```bash
-kubectl cnpg status suse-psql -n db-production
+psql -h 192.168.64.11 -U postgres
+# password: <value from /etc/postgres/postgres.env>
 ```
 
-(Install the [cnpg kubectl plugin](https://cloudnative-pg.io/documentation/current/kubectl-plugin/) first if you don't have it.)
+(Or whatever IP DHCP assigned, if you removed the static network file.)
 
-### Accessing Rancher
+### Inspect data
+
+The PostgreSQL data directory lives at `/var/lib/postgres/data` on the host (bind-mounted into the container at `/var/lib/postgresql/data`):
 
 ```bash
-kubectl get secret --namespace cattle-system bootstrap-secret \
-  -o go-template='{{.data.bootstrapPassword|base64decode}}{{"\n"}}'
+sudo ls /var/lib/postgres/data
 ```
 
-Then browse to `https://192.168.64.10.sslip.io`.
+This survives reboots, `podman rm`, and image pulls — it's only tied to the host filesystem.
+
+---
+
+## Managing the Container
+
+The quadlet is a regular systemd unit (after generation), so use `systemctl`:
+
+```bash
+sudo systemctl restart postgres.service
+sudo systemctl stop postgres.service
+sudo systemctl start postgres.service
+sudo systemctl status postgres.service
+journalctl -u postgres.service -f
+```
+
+After editing `/etc/containers/systemd/postgres.container`, reload the generator and restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart postgres.service
+```
 
 ---
 
 ## Customization
 
-### Scale the PostgreSQL cluster
+### Change the data directory
 
-Edit `rancher-3node/kubernetes/manifests/02-postgres-cluster.yaml`:
+Edit `psql-podman/os-files/etc/containers/systemd/postgres.container`:
 
-```yaml
-spec:
-  instances: 5         # add replicas
-  storage:
-    size: 100Gi        # bigger volumes
-  resources:
-    requests:
-      memory: "2Gi"
-      cpu: "1"
-    limits:
-      memory: "8Gi"
+```ini
+Volume=/srv/postgres-data:/var/lib/postgresql/data:Z
 ```
 
-CNPG will reconcile rolling.
+And update `10-postgres-bootstrap.sh` so it `mkdir`s the new path. Useful if you want to put the data on a separate disk — partition/mount it before first boot, then bind-mount.
+
+### Change the published port
+
+```ini
+PublishPort=15432:5432
+```
 
 ### Use a different Postgres image
 
-Swap `spec.imageName` to any CNPG-compatible image (e.g., a different SUSE Postgres tag, or upstream `ghcr.io/cloudnative-pg/postgresql`). Don't forget to add it to `embeddedArtifactRegistry.images` in `eib-config.yaml` if you want it bundled into the ISO.
+Swap `Image=` in the quadlet, **and** update `embeddedArtifactRegistry.images` in `eib-config.yaml` so the new image is bundled into the ISO (otherwise it'll try to pull at first start and fail if the VM has no internet).
 
-### Change the storage class
+### Pin a stronger / weaker password policy
 
-The default is `longhorn-replicated-2` (2 replicas). Switch `storage.storageClass` to `longhorn-replicated-3` for stronger durability at the cost of capacity. The available classes are defined in `rancher-3node/kubernetes/manifests/01-longhorn-storageclass.yaml`.
+Edit `10-postgres-bootstrap.sh` — adjust `head -c 32` (length) or the `tr -dc` character class (e.g., add `_-!@%` for symbols).
 
-### Adjust Helm charts
+### Run as a non-privileged container
 
-Modify `kubernetes.helm.charts` in `eib-config.yaml`. Each entry needs `name`, `version`, `repositoryName`, `targetNamespace`.
-
-### Change Kubernetes version
-
-```yaml
-kubernetes:
-  version: v1.34.8+k3s1
-```
-
-See [k3s releases](https://github.com/k3s-io/k3s/releases).
+Add `User=postgres` and adjust the volume ownership. The SUSE postgres image runs as uid 999 by default — bind mounts may need matching ownership on the host.
 
 ---
 
@@ -234,29 +230,46 @@ See [k3s releases](https://github.com/k3s-io/k3s/releases).
 
 ### Build failures
 
-- **"No space left on device"** — increase Podman disk: `podman machine rm && podman machine init --cpus 6 --memory 8192 --disk-size 100`
-- **"Permission denied"** — make sure `podman run` includes `--privileged`
-- **Package install failures** — verify your SCC registration code
+- **"No space left on device"** — increase Podman machine disk: `podman machine rm && podman machine init --cpus 6 --memory 8192 --disk-size 100`
+- **"Permission denied"** — the build needs `--privileged`
+- **Package install failures** — verify SCC registration code is valid
 
-### PostgreSQL cluster won't start
+### postgres.service doesn't start
 
-- Check operator logs: `kubectl logs -n cnpg-system -l app.kubernetes.io/name=cloudnative-pg`
-- Check cluster events: `kubectl describe cluster suse-psql -n db-production`
-- Check PVCs are bound: `kubectl get pvc -n db-production` (Longhorn must be healthy)
-- Verify Longhorn nodes: `kubectl get nodes.longhorn.io -n longhorn-system`
+Check the generator picked up the quadlet:
 
-### LoadBalancer service stuck pending
+```bash
+sudo systemctl list-unit-files | grep postgres
+sudo /usr/libexec/podman/podman-system-generator --user=0 --dry-run
+```
 
-- The IP pool / L2 advertisement manifests (`postgres-ippool-l2adv.yaml`) must apply successfully. Check MetalLB / Longhorn LB controller logs.
+If the unit is missing, the quadlet syntax is probably wrong. Check `journalctl -b | grep -i quadlet`.
+
+### Container exits immediately
+
+```bash
+podman logs postgres
+```
+
+Most common cause: `POSTGRES_PASSWORD` empty or missing — verify `/etc/postgres/postgres.env` exists and is readable by root.
+
+### Embedded image didn't pull
+
+If `podman ps -a` shows the container failing with "image not found", the embedded artifact registry may not have populated for podman. Manually pull:
+
+```bash
+sudo podman pull registry.suse.com/suse/postgres:18
+sudo systemctl restart postgres.service
+```
+
+(Requires network access. EIB's embedded registry is primarily wired for k3s/RKE2; podman pulls may not auto-mirror in all EIB versions.)
 
 ---
 
 ## Resources
 
-- [CloudNativePG Documentation](https://cloudnative-pg.io/documentation/)
-- [SUSE PostgreSQL Container](https://registry.suse.com/suse/postgres)
+- [Podman Quadlet documentation](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html)
+- [SUSE PostgreSQL container](https://registry.suse.com/suse/postgres)
 - [Edge Image Builder](https://github.com/suse-edge/edge-image-builder)
 - [SUSE Linux Micro Downloads](https://www.suse.com/download/sle-micro/)
-- [Rancher Documentation](https://ranchermanager.docs.rancher.com/)
-- [Longhorn Documentation](https://longhorn.io/docs/)
-- [k3s Documentation](https://docs.k3s.io/)
+- [Sibling repo: eib-psql-lab (HA CloudNativePG variant)](https://github.com/achuza/eib-psql-lab)
