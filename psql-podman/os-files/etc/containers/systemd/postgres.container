@@ -1,7 +1,7 @@
 [Unit]
 Description=SUSE PostgreSQL 18 (Podman)
-Wants=network-online.target
-After=network-online.target
+Wants=network-online.target eib-embedded-registry.service
+After=network-online.target eib-embedded-registry.service
 ConditionPathExists=/etc/postgres/postgres.env
 
 [Container]

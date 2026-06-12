@@ -23,11 +23,13 @@ This is the lightweight, no-Kubernetes counterpart to [eib-psql-lab](https://git
 
 ```
 psql-podman/
-  eib-config.yaml                                    # EIB definition (no k8s block)
-  custom/scripts/10-postgres-bootstrap.sh            # First-boot: generate password + env file
-  os-files/etc/containers/systemd/postgres.container # Quadlet: postgres.service at boot
-  os-files/etc/ssh/sshd_config                       # Enables root SSH
-  network/psql.suse.com.yaml                         # Static net config (optional; delete for DHCP)
+  eib-config.yaml                                              # EIB definition (no k8s block)
+  custom/scripts/10-postgres-bootstrap.sh                      # First-boot: generate password + env file
+  os-files/etc/containers/systemd/postgres.container           # Quadlet: postgres.service at boot
+  os-files/etc/tmpfiles.d/postgres.conf                        # Creates /var/lib/postgres/data at every boot
+  os-files/etc/containers/registries.conf.d/000-eib-mirror.conf # Mirrors registry.suse.com → embedded Hauler registry
+  os-files/etc/ssh/sshd_config                                 # Enables root SSH
+  network/psql.suse.com.yaml                                   # Static net config (optional; delete for DHCP)
 ```
 
 ---
@@ -204,7 +206,15 @@ Edit `psql-podman/os-files/etc/containers/systemd/postgres.container`:
 Volume=/srv/postgres-data:/var/lib/postgresql/data:Z
 ```
 
-And update `10-postgres-bootstrap.sh` so it `mkdir`s the new path. Useful if you want to put the data on a separate disk — partition/mount it before first boot, then bind-mount.
+If the new path lives under `/var` (or any other writable subvolume that isn't mounted during combustion), also update `os-files/etc/tmpfiles.d/postgres.conf` so the directory is created on every boot:
+
+```
+d /srv/postgres-data 0700 root root -
+```
+
+Do **not** `mkdir` it from `10-postgres-bootstrap.sh` — combustion runs inside a transactional-update chroot where `/var` is not mounted, so writes there land in an orphaned snapshot and vanish at boot. `tmpfiles.d` runs after `/var` is mounted and is the correct hook.
+
+Useful if you want to put the data on a separate disk — partition/mount it before first boot, then bind-mount.
 
 ### Change the published port
 
@@ -255,14 +265,24 @@ Most common cause: `POSTGRES_PASSWORD` empty or missing — verify `/etc/postgre
 
 ### Embedded image didn't pull
 
-If `podman ps -a` shows the container failing with "image not found", the embedded artifact registry may not have populated for podman. Manually pull:
+EIB's embedded artifact registry is primarily wired for k3s/RKE2, so Podman doesn't see it out of the box. This image works around that by shipping `os-files/etc/containers/registries.conf.d/000-eib-mirror.conf`, which mirrors `registry.suse.com` through the on-host Hauler registry at `localhost:6545` (served by `eib-embedded-registry.service`). The `postgres.container` quadlet also waits on that service.
+
+If `podman ps -a` still shows the container failing with "image not found":
 
 ```bash
+# Confirm the embedded registry is up
+systemctl status eib-embedded-registry.service
+curl -s http://localhost:6545/v2/_catalog
+
+# Confirm the mirror config is in place
+cat /etc/containers/registries.conf.d/000-eib-mirror.conf
+
+# Force a pull via the mirror
 sudo podman pull registry.suse.com/suse/postgres:18
 sudo systemctl restart postgres.service
 ```
 
-(Requires network access. EIB's embedded registry is primarily wired for k3s/RKE2; podman pulls may not auto-mirror in all EIB versions.)
+If the registry service is dead, check `journalctl -u eib-embedded-registry.service` — usually a Hauler startup error. As a last resort (with internet), drop the mirror file and let Podman pull from the real `registry.suse.com`.
 
 ---
 
